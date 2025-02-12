@@ -21,9 +21,15 @@
 #define IP_HEADER_LEN	20
 
 /* Define the range for IPv4 addr assignment */
+/* TODO: could be changed with a parameter? Not to limit to 252 clients */
 #define IPV4_ADDR_START	"10.0.0.2"
 #define IPV4_ADDR_END	"10.0.0.254"
 
+/* TODO: Why 5min? When a TCP connection is established the timeout is several
+ * hours. I would recommend the TCP proxy to use the TCP KeepAlive feature, and
+ * set the timeout here accordingly (+ a comment to understand the link).
+ * e.g. to cope with long live connections like a notification channel
+ */
 #define CONN_TIMEOUT	300
 
 /* struct connection_store -	This is the structure for holding peer's
@@ -37,6 +43,7 @@
 struct connection_store {
 	struct in_addr peer_ip_addr;
 	uint16_t peer_udp_port;
+	/* TODO: only store IP instead of the whole struct, and only use IP? */
 	struct in_addr peer_tun_ip_addr;
 	time_t last_seen;
 	/* TODO: avoid using a list (O(n)), use a HashMap (O(1)) */
@@ -60,15 +67,6 @@ struct tunnel_config {
 	/* TODO: avoid using a list (O(n)), use a HashMap (O(1)) */
 	struct connection_store *store;
 };
-
-/* TODO: for the hashmap, we could have optimisations on the structure, because
- * the number of clients (IP addr + UDP port) should be limited, while the
- * number of TCP connections can be important. We could then store a hashmap of
- * IP address, and each one would have a hashmap of TCP ports. (A list of UDP
- * ports could be used per IP address: if there is only one item, no need to
- * find the corresponding TCP connection. But still needed to store them in case
- * another client is added later)
- */
 
 /* Helper function to generate a random IP in our range */
 static uint32_t generate_random_local_ip(void)
@@ -100,11 +98,14 @@ static int is_ip_in_use(struct tunnel_config *config, uint32_t ip)
 		current = current->next;
 	}
 
-	return 0;
+	return 0; /* TODO: (detail: might be clearer to deal with "bool") */
 }
 
 /* Store connection information: peer's IPv4 addr, UDP port, and return the
  * assigned tunnel IPv4 address.
+ */
+/* TODO: either return a pointer to the struct or the IP directly, but not a
+ * copy of the structure
  */
 static struct in_addr store_connection(struct tunnel_config *config,
 				       struct in_addr saddr, uint16_t udp_sport)
@@ -123,6 +124,7 @@ static struct in_addr store_connection(struct tunnel_config *config,
 			return current->peer_tun_ip_addr;
 		}
 		/* Also update last_seen for any matching IP to prevent timeout */
+		/* TODO: needed? Could be another client, or a previous tunnel */
 		if (current->peer_ip_addr.s_addr == saddr.s_addr) {
 			current->last_seen = now;
 		}
@@ -139,8 +141,16 @@ static struct in_addr store_connection(struct tunnel_config *config,
 
 	/* Generate unique random local IP */
 	do {
+		/* TODO: not sure a random IP is needed, we could take
+		 * the last one +1 instead of looping until we get a free one.
+		 */
 		local_ip = generate_random_local_ip();
 	} while (is_ip_in_use(config, local_ip));
+	/* TODO: handle the case where all IPs are used. For the moment, someone
+	 * sending random data to the UDP listen socket can easily fill this up,
+	 * and this would loop forever. (or the tunnel is restarted multiple
+	 * times, etc.) + log when it happens
+	 */
 
 	entry->peer_ip_addr = saddr;
 	entry->peer_udp_port = udp_sport;
@@ -194,6 +204,9 @@ static uint16_t get_stored_port(struct tunnel_config *config,
 	return 0;
 }
 
+/* TODO: what if the MTU is lower between the client and server? Could be maybe
+ * tested at the auth part?
+ */
 static int get_interface_mtu(char *interface)
 {
 	struct ifreq ifr = { };
@@ -375,6 +388,7 @@ static void process_tun_packet(int tun_fd, int udp_fd,
 
 	ip = (struct iphdr *)buffer;
 
+	/* TODO: ip->ihl: or use it below to get the offset and total len */
 	if (ip->protocol != IPPROTO_TCP || ip->ihl != 5)
 		return;
 
@@ -387,10 +401,15 @@ static void process_tun_packet(int tun_fd, int udp_fd,
 	if (config->endpoint_port == 0) {
 		struct in_addr peer_tun_ip_addr = {.s_addr = ip->daddr };
 
+		/* TODO: Avoid going twice through the connection list, e.g.
+		 *   if (!get_stored_addr_port(config, peer_tun_ip_addr, &daddr, &dport))
+		 *        return;
+		 */
 		dport = get_stored_port(config, peer_tun_ip_addr);
 		daddr = get_stored_addr(config, peer_tun_ip_addr);
 
 		if (dport == 0 || daddr.s_addr == INADDR_ANY) {
+			/* TODO: probably best to log that somewhere. */
 			return;
 		}
 	} else {
@@ -427,6 +446,12 @@ static void process_udp_packet(int tun_fd, int udp_fd,
 		return;
 	}
 
+	/* TODO: what if we received less than the tcp header size? We will
+	 * read the buffer containing random data. It should be OK because the
+	 * packet will certainly be dropped, but probably best to avoid reading
+	 * garbage.
+	 */
+
 	/* TODO: add some sanity checks, e.g. checking to see if the data in the
 	 * buffer looks OK? e.g. checking if there are MPTCP options? Maybe
 	 * something else?
@@ -450,6 +475,7 @@ static void process_udp_packet(int tun_fd, int udp_fd,
 	}
 
 	/* Get tunnel interface IP address */
+	/* TODO: avoid doing a ioctl for each packet, cache the info once */
 	if (get_interface_ip(config->interface, &tun_ip_addr) < 0) {
 		fprintf(stderr, "Failed to get tunnel interface IP\n");
 		return;
@@ -463,6 +489,10 @@ static void process_udp_packet(int tun_fd, int udp_fd,
 	ip.check = ip_checksum(&ip, IP_HEADER_LEN);
 
 	/* Make space for the IPv4 header */
+	/* TODO: instead of writing at the beginning of the bugger, and moving
+	 * data at an offsett, hen, why not asking recvfrom to write directly
+	 * from this offset?
+	 */
 	memmove(&buffer[IP_HEADER_LEN], &buffer[0], len);
 	/* Insert the IPv4 header */
 	memcpy(&buffer[0], &ip, IP_HEADER_LEN);
@@ -588,6 +618,12 @@ int main(int argc, char *argv[])
 		exit(1);
 	}
 
+	/* TODO: on the client side, a UDP connect could be done here to avoid a
+	 * route lookup on the kernel side for each packet. This could be done
+	 * on the server side as well when receiving the first connection from a
+	 * client I suppose.
+	 */
+
 	printf("Tunnel started:\n");
 	printf("TUN interface: %s\n", config.interface);
 	printf("Bound to interface: %s\n", config.bind_interface);
@@ -597,8 +633,10 @@ int main(int argc, char *argv[])
 	}
 
 	/* Main loop
-	 * TODO: use multiple workers to be able to scale on a host with more
-	 * than one core.
+	 * TODO: use multiple workers (thread or process) to be able to scale on
+	 * a host with more than one core: the kernel will likely process the
+	 * packets from different cores, it should continue on the same one
+	 * here, instead of moving everything to a single core for all packets.
 	 */
 	fd_set readfds;
 	while (1) {
@@ -619,6 +657,10 @@ int main(int argc, char *argv[])
 		}
 
 		/* Run cleanup periodically */
+		/* TODO: at least do that after having processed the packet
+		 * not to delay them even more. Or ideally do that in a parallel
+		 * thread.
+		 */
 		time_t now = time(NULL);
 		if (now - last_cleanup >= 60) {
 			cleanup_old_connections(&config);
